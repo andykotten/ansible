@@ -1,0 +1,10 @@
+---
+
+adhoc test$ ansible LAB3 -m passreset -a "devicetype=\"juniper\" ip=\"10.127.0.47\" user=\"root\" newpass=\"M\" password=\"abc123\"" -f 10
+
+run playbook$ ansible-playbook playbook.yml -f 10
+see what hosts affected before run$ ansible-playbook playbook.yml --limit IAD1 --list-hosts
+
+pass variables thru command line$ ansible-playbook site.yml --extra-vars "username= password="
+
+Example$ ansible-playbook -i labhosts passreset.yml

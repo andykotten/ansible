@@ -1,0 +1,3 @@
+---
+ansible_ssh_user: nas
+#pass: vars_prompt for password in playbook instead

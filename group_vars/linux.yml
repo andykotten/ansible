@@ -1,0 +1,5 @@
+---
+group_name: linux
+ansible_ssh_user: nas
+ansible_ssh_pass: "{{ pass }}"
+ansible_become_pass: "{{ pass }}"

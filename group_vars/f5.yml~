@@ -1,0 +1,3 @@
+---
+user: admin
+ansible_connection: local

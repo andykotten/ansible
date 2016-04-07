@@ -1,0 +1,9 @@
+---
+dns_server: 2.2.2.2
+
+adhoc test$ ansible LAB3 -m passreset -a "devicetype=\"juniper\" ip=\"10.127.0.47\" user=\"root\" newpass=\"M\" password=\"abc123\"" -f 10
+
+passreset goes in /library ?
+
+run playbook$ ansible-playbook playbook.yml -f 10
+see what hosts affected before run$ ansible-playbook playbook.yml --list-hosts

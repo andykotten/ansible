@@ -1,0 +1,37 @@
+---
+
+- hosts: all
+
+  vars_prompt:
+   - name: pass
+     prompt: Enter current password
+     private: yes     
+   - name: newpassword
+     prompt: Enter new password
+     confirm: yes
+     
+  tasks:
+    
+  - name: reset password on networking devices
+    local_action: >
+     passreset
+     devicetype={{ group_name }}
+     ip={{ inventory_hostname }}
+     user={{ user }}
+     password={{ pass }}
+     newpass={{ newpassword }}
+    when: group_name != "linux"
+    ignore_errors: yes
+    
+  - name: generate hashed password
+    command: python -c 'import crypt; print crypt.crypt("{{ newpassword }}", "$6$salt$")'
+    register: hashedpassword
+    when: group_name == "linux"
+    
+  - name: reset password on linux servers
+    #user: name=root password=hashedpassword
+    user: name=nas password='{{hashedpassword.stdout}}'
+    become: yes
+    become_method: sudo
+    when: group_name == "linux"
+    ignore_errors: yes

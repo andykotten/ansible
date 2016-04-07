@@ -1,0 +1,8 @@
+---
+
+- name: Get new password and hash it for linux servers.
+  vars:
+   shell: python -c "import getpass; print getpass.getpass()"
+   register: newpassword   #.stdout?
+ #  shell: python -c "from passlib.hash import sha512_crypt; import getpass; print sha512_crypt.encrypt({{ newpassword }})"
+  # register: hashedpassword

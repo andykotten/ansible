@@ -1,0 +1,250 @@
+#!/usr/bin/python
+
+DOCUMENTATION = '''
+---
+module: passreset
+short_description: This is a module to change the root/admin password of networking devices.
+description:
+	- The following devices are supported
+	- Cisco Nexus	(thru netconf api)
+	- Cisco IOS		(thru raw ssh)
+	- F5			(thru rest api and raw ssh)
+	- Palo Alto		(thru rest api)
+	- JUNOS			(thru pyez/netconf)
+author: "Andrew Kottenstette"
+requirements:
+	- The following python packages are required
+	- ncclient, junos-eznc, requests, passlib, paramiko
+options:
+	devicetype:
+		required: true
+		description:
+			- Type of networking device.
+		choices: [ "f5", "nexus", "cisco", "paloalto", "juniper" ]
+	ip:
+		required: true
+		description:
+			- Ip of networking device.
+	user:
+		required: true
+		description:
+			- Username to log into device.
+	password:
+		required: true
+		description:
+			- Password to log into device.
+	newpass:
+		required: true
+		description:
+			- New password to change to.
+'''
+
+EXAMPLES = '''
+# Change the admin & root password on F5 device 1.2.3.4 from 'test' to 'abc123'.
+- passreset: devicetype=f5 ip=1.2.3.4 user=admin password=test newpass=abc123
+'''
+
+try:	
+	import requests, sys, json, paramiko, re, time
+	from ncclient import manager
+	from ncclient import operations
+	from ncclient import transport
+	from jnpr.junos import Device
+	from jnpr.junos.utils.config import Config
+	from jnpr.junos.exception import *
+	from passlib.hash import md5_crypt
+	HAS_LIB=True
+except:
+	HAS_LIB=False
+
+def f5_change_password(BIGIP_ADDRESS, BIGIP_USER, BIGIP_PASS, newpass):
+
+	requests.packages.urllib3.disable_warnings()
+	bigip = requests.session()
+	bigip.auth = (BIGIP_USER, BIGIP_PASS)
+	bigip.verify = False
+	bigip.headers.update({'Content-Type' : 'application/json'})
+	BIGIP_URL_BASE = 'https://%s/mgmt/tm' % BIGIP_ADDRESS
+	payload = {}
+	payload['password'] = newpass
+	
+	try:
+		r = bigip.put('%s/auth/user/admin' % BIGIP_URL_BASE, data=json.dumps(payload), timeout=5)
+		if r.status_code == 401:
+		    return "F5: credentials for admin failed"
+	
+	#not able to change root password thru the API at this time
+	#bigip.put('%s/auth/password/root' % BIGIP_URL_BASE, data=json.dumps(payload), timeout=5)
+		try:
+			remote_conn = paramiko.SSHClient()
+			remote_conn.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+			remote_conn.connect(BIGIP_ADDRESS, username = 'root', password = BIGIP_PASS, timeout=5)
+		except paramiko.AuthenticationException:
+			return "F5: ssh credentials for root failed"
+		except:
+			return "F5: could not ssh to %s" % BIGIP_ADDRESS
+			
+		stdin, stdout, stderr = remote_conn.exec_command("tmsh modify auth password root")
+		stdin.write('%s\n%s\n' %(newpass, newpass))
+		stdin.flush()
+		time.sleep(.5)
+		stdin, stdout, stderr = remote_conn.exec_command("tmsh save sys config")
+		remote_conn.close()
+
+			
+	except requests.exceptions.ConnectTimeout:
+		return "F5: could not connect to %s" % BIGIP_ADDRESS
+		
+	return ""
+   
+def nexus_change_password(ip, username, oldpassword, newpass):
+	try:
+		with manager.connect(host=ip,
+							port=22,
+							username=username,
+							password=oldpassword,
+							hostkey_verify=False,
+							device_params={'name': 'nexus'},
+							allow_agent=False,
+							look_for_keys=False
+							) as cisco_manager:
+                                              
+			confcommand = {"conf t ; username admin password %s" %newpass}
+			cisco_manager.exec_command(confcommand)
+			confcommand = {"conf t ; username nas password %s ; copy run start" %newpass}
+			cisco_manager.exec_command(confcommand)
+	except transport.AuthenticationError:
+		return "Nexus: Authentication failed"
+	except operations.rpc.RPCError:
+	    return "Nexus: password too weak to use"
+	except transport.errors.SSHError:
+		return "Nexus: Couldn't connect to %s" % ip
+	
+	return ""
+        
+def cisco_change_password(ip, username, oldpassword, newpassword):
+	try:
+		remote_conn_pre = paramiko.SSHClient()
+		remote_conn_pre.set_missing_host_key_policy(paramiko.AutoAddPolicy()) 
+		remote_conn_pre.connect(ip, username = username, password = oldpassword, timeout=5)
+		remote_conn = remote_conn_pre.invoke_shell()
+		remote_conn.send("conf t\n")
+		time.sleep(.5)
+		remote_conn.send("username nas secret %s\n" %newpassword)
+		time.sleep(.5)
+		remote_conn.send("enable secret %s\n" %newpassword)
+		time.sleep(.5)
+		remote_conn.send("exit\n")
+		time.sleep(2)
+		remote_conn.send("copy run start\n")
+		time.sleep(2)
+		remote_conn.send("\r\n")
+	except paramiko.AuthenticationException:
+		return "Cisco: ssh credentials failed"
+	except:
+		return "Cisco: could not connect to %s" % ip
+		
+	return ""
+
+def paloalto_change_password(ip, username, oldpassword, newpass):
+	requests.packages.urllib3.disable_warnings()
+	pa = requests.session()
+	pa.verify = False
+	pa.headers.update({'Content-Type' : 'application/xml'})
+	pa_URL_BASE = 'https://%s/api' % ip
+	
+	try:
+		key = pa.get('%s/?type=keygen&user=%s&password=%s' % (pa_URL_BASE, username, oldpassword), timeout=5)
+		
+		if key.text.find('403') != -1:
+		    return "PaloAlto: credentials for admin failed"
+		    
+		else:
+			key = re.search(r'(key>)(.*)(</key)', key.text).group(2)
+                    
+			hashedpass = md5_crypt.encrypt(newpass)
+	
+			r = pa.post('%s/?key=%s&type=config&action=set&xpath=/config/mgt-config/users/entry[@name=\'admin\']&element=<phash>%s</phash>' % (pa_URL_BASE, key, hashedpass))
+			
+			key = pa.get('%s/?type=keygen&user=%s&password=%s' % (pa_URL_BASE, username, newpass), timeout=5)
+			key = re.search(r'(key>)(.*)(</key)', key.text).group(2)
+	
+			r = pa.post('%s/?key=%s&type=commit&cmd=<commit></commit>' % (pa_URL_BASE, key))
+					
+	except requests.exceptions.ConnectionError:
+		return "PaloAlto: could not connect to %s" % ip
+		
+	return ""
+	
+def juniper_change_password(ip, username, oldpassword, newpass):
+	hashedpassword = md5_crypt.encrypt(newpass)
+	device = Device(host=ip, user=username, password=oldpassword)
+	try:
+		device.open()
+		cfg = Config(device)
+		try:
+			cfg.lock()
+	#does juniper have nas account? 
+			#cfg.load("set system login user nas authentication encrypted-password " + hashedpassword, format="set", merge=True)
+			cfg.load("set system root-authentication encrypted-password " + hashedpassword, format="set", merge=True)
+			cfg.commit(comment="Password change script")
+			cfg.unlock()
+		except LockError:
+			return "JUNOS: Unable to lock configuration for %s" %ip
+	except:
+		return "JUNOS: Cannot connect to %s" %ip
+		
+	return ""
+
+#if changing LINUX pass can just do directly thru Ansible using 'user' module
+	
+def main():
+
+	module = AnsibleModule(
+		argument_spec = dict(
+			devicetype	=	dict(required=True, choices=['f5', 'nexus', 'cisco', 'paloalto', 'juniper'], type='str'),
+			ip			=	dict(required=True, type='str'),
+			user		=	dict(required=True, type='str'),
+			password	=	dict(required=True, type='str', no_log=True),
+			newpass		=	dict(required=True, type='str'),
+		),
+		supports_check_mode=False
+	)
+
+	if not HAS_LIB:
+		module.fail_json(msg="Missing a python package. Refer to requirements section.")
+		
+	device = module.params.get('devicetype')
+	ADDRESS = module.params.get('ip')
+	USER = module.params.get('user')
+	PASS = module.params.get('password')
+	new_pass = module.params.get('newpass')
+
+	result = {}
+	result['changed'] = True
+	result['ip'] = ADDRESS
+	result['msg'] = ""
+	
+	if device == 'f5':
+		result['msg'] = f5_change_password(ADDRESS, USER, PASS, new_pass)
+	elif device == 'nexus':
+		result['msg'] = nexus_change_password(ADDRESS, USER, PASS, new_pass)
+	elif device == 'paloalto':
+		result['msg'] = paloalto_change_password(ADDRESS, USER, PASS, new_pass)
+	elif device == 'juniper':
+		result['msg'] = juniper_change_password(ADDRESS, USER, PASS, new_pass)
+	elif device == 'cisco':
+		result['msg'] = cisco_change_password(ADDRESS, USER, PASS, new_pass)
+	else:
+		result['msg'] = "Unsupported device type specified."
+		
+	if result['msg'] != "":
+		result['changed'] = False
+		module.fail_json(**result)
+	else:
+		del result['msg']
+		module.exit_json(**result)
+
+from ansible.module_utils.basic import *
+if __name__ == "__main__":
+	main()

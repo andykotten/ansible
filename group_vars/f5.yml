@@ -1,0 +1,4 @@
+---
+group_name: f5
+user: admin
+ansible_connection: local
